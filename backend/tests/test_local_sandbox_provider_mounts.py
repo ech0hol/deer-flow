@@ -545,6 +545,8 @@ class TestLocalSandboxProviderMounts:
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
+        public_dir = skills_dir / "public"
+        public_dir.mkdir()
         custom_dir = tmp_path / "custom"
         custom_dir.mkdir()
 
@@ -564,11 +566,17 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/custom-skills"]
+        # Public skills are the only static skills mount; custom skills are
+        # per-user and built dynamically in _build_thread_path_mappings.
+        # Custom volume mount /custom-skills/nested is also included (not
+        # a reserved prefix like /custom-skills/custom).
+        assert [m.container_path for m in provider._path_mappings] == ["/custom-skills/public", "/custom-skills/nested"]
 
     def test_setup_path_mappings_skips_relative_host_path(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
+        public_dir = skills_dir / "public"
+        public_dir.mkdir()
 
         from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
 
@@ -586,11 +594,14 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+        # Public skills mount is static; custom skills are per-thread.
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
 
     def test_setup_path_mappings_skips_non_absolute_container_path(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
+        public_dir = skills_dir / "public"
+        public_dir.mkdir()
         custom_dir = tmp_path / "custom"
         custom_dir.mkdir()
 
@@ -610,7 +621,7 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
 
     def test_setup_path_mappings_logs_actionable_error_for_missing_host_path(self, tmp_path, caplog):
         """Regression for #3244.
@@ -624,6 +635,8 @@ class TestLocalSandboxProviderMounts:
         """
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
+        public_dir = skills_dir / "public"
+        public_dir.mkdir()
         missing_host_path = tmp_path / "does-not-exist"
 
         from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
@@ -644,7 +657,8 @@ class TestLocalSandboxProviderMounts:
                 provider = LocalSandboxProvider()
 
         # Silent-skip behaviour is preserved (no breaking change for existing deployments).
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+        # Only public skills mount is static; custom skills are per-thread.
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public"]
 
         # The failure must be observable at ERROR level and reference the offending paths.
         error_records = [r for r in caplog.records if r.levelname == "ERROR"]
@@ -755,6 +769,8 @@ class TestLocalSandboxProviderMounts:
     def test_setup_path_mappings_normalizes_container_path_trailing_slash(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
+        public_dir = skills_dir / "public"
+        public_dir.mkdir()
         custom_dir = tmp_path / "custom"
         custom_dir.mkdir()
 
@@ -774,7 +790,7 @@ class TestLocalSandboxProviderMounts:
         with patch("deerflow.config.get_app_config", return_value=config):
             provider = LocalSandboxProvider()
 
-        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills", "/mnt/data"]
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills/public", "/mnt/data"]
 
 
 class TestLocalSandboxProviderResetClearsSingleton:

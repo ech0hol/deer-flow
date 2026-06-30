@@ -38,9 +38,19 @@ def is_valid_internal_auth_token(token: str | None) -> bool:
     return bool(token) and secrets.compare_digest(token, _INTERNAL_AUTH_TOKEN)
 
 
-def get_internal_user():
-    """Return the synthetic user used for trusted internal channel calls."""
-    return SimpleNamespace(id=DEFAULT_USER_ID, system_role=INTERNAL_SYSTEM_ROLE)
+def get_internal_user(owner_user_id: str | None = None):
+    """Return the synthetic user used for trusted internal channel calls.
+
+    When *owner_user_id* is provided (extracted from the
+    ``X-DeerFlow-Owner-User-Id`` header), the synthetic user's ``.id``
+    carries the actual channel owner instead of ``DEFAULT_USER_ID``.
+    This ensures that ``get_effective_user_id()`` and downstream
+    filesystem-path resolution (per-user custom skills, memory, thread
+    data) use the correct identity for IM channel messages instead of
+    falling back to ``"default"``.
+    """
+    effective_id = owner_user_id or DEFAULT_USER_ID
+    return SimpleNamespace(id=effective_id, system_role=INTERNAL_SYSTEM_ROLE)
 
 
 def get_trusted_internal_owner_user_id(request: Any) -> str | None:

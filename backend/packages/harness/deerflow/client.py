@@ -42,7 +42,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -255,13 +255,16 @@ class DeerFlowClient:
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
+                user_id=get_effective_user_id(),
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
+                user_id=get_effective_user_id(),
             ),
             "state_schema": ThreadState,
         }
@@ -879,6 +882,7 @@ class DeerFlowClient:
             Dict with "skills" key containing list of skill info dicts,
             matching the Gateway API ``SkillsListResponse`` schema.
         """
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
         return {
             "skills": [
                 {
@@ -888,7 +892,7 @@ class DeerFlowClient:
                     "category": s.category,
                     "enabled": s.enabled,
                 }
-                for s in get_or_new_skill_storage().load_skills(enabled_only=enabled_only)
+                for s in storage.load_skills(enabled_only=enabled_only)
             ]
         }
 
@@ -997,9 +1001,8 @@ class DeerFlowClient:
         Returns:
             Skill info dict, or None if not found.
         """
-        from deerflow.skills.storage import get_or_new_skill_storage
-
-        skill = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
+        skill = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
         if skill is None:
             return None
         return {
@@ -1024,32 +1027,55 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
-        from deerflow.skills.storage import get_or_new_skill_storage
-
-        skills = get_or_new_skill_storage().load_skills(enabled_only=False)
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
+        skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found")
 
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+        # PUBLIC skills → global extensions_config.json (shared state).
+        # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state).
+        from deerflow.skills.types import SkillCategory
 
-        extensions_config = get_extensions_config()
-        extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
+        if skill.category == SkillCategory.PUBLIC:
+            config_path = ExtensionsConfig.resolve_config_path()
+            if config_path is None:
+                raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
-        config_data = {
-            "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-            "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-        }
+            extensions_config = get_extensions_config()
+            extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-        self._atomic_write_json(config_path, config_data)
+            config_data = {
+                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
+                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
+            }
+
+            self._atomic_write_json(config_path, config_data)
+            reload_extensions_config()
+        else:
+            # CUSTOM / LEGACY: write per-user state
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+            if isinstance(storage, UserScopedSkillStorage):
+                storage.set_skill_enabled_state(name, enabled)
+            else:
+                # Fallback for non-user-scoped storage (unlikely in practice)
+                config_path = ExtensionsConfig.resolve_config_path()
+                if config_path is None:
+                    raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+                extensions_config = get_extensions_config()
+                extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
+                config_data = {
+                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
+                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
+                }
+                self._atomic_write_json(config_path, config_data)
+                reload_extensions_config()
 
         self._agent = None
         self._agent_config_key = None
-        reload_extensions_config()
 
-        updated = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+        updated = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:
             raise RuntimeError(f"Skill '{name}' disappeared after update")
         return {
@@ -1073,7 +1099,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return get_or_new_skill_storage().install_skill_from_archive(skill_path)
+        return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

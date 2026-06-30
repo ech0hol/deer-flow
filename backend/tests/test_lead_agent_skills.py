@@ -74,10 +74,12 @@ def test_get_skills_prompt_section_includes_slash_activation_guidance(monkeypatc
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: skills))
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda user_id, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: skills))
     monkeypatch.setattr(
         "deerflow.config.get_app_config",
         lambda: SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
             skill_evolution=SimpleNamespace(enabled=True),
         ),
     )
@@ -88,10 +90,12 @@ def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
 
 def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(monkeypatch):
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [])
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: []))
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda user_id, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: []))
     monkeypatch.setattr(
         "deerflow.config.get_app_config",
         lambda: SimpleNamespace(
-            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
             skill_evolution=SimpleNamespace(enabled=True),
         ),
     )
@@ -103,8 +107,10 @@ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(
 def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: skills))
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda user_id, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: skills))
     config = SimpleNamespace(
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=True),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
@@ -119,7 +125,7 @@ def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeyp
 
 def test_get_skills_prompt_section_uses_explicit_config_for_enabled_skills(monkeypatch):
     explicit_config = SimpleNamespace(
-        skills=SimpleNamespace(container_path="/mnt/alt-skills"),
+        skills=SimpleNamespace(container_path="/mnt/alt-skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/alt-skills")),
         skill_evolution=SimpleNamespace(enabled=False),
     )
 
@@ -131,6 +137,10 @@ def test_get_skills_prompt_section_uses_explicit_config_for_enabled_skills(monke
     monkeypatch.setattr(
         "deerflow.agents.lead_agent.prompt.get_or_new_skill_storage",
         lambda app_config=None, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("explicit-skill")] if app_config is explicit_config else []),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage",
+        lambda user_id, app_config=None, **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("explicit-skill")] if app_config is explicit_config else []),
     )
 
     result = get_skills_prompt_section(app_config=explicit_config)
@@ -149,7 +159,7 @@ def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [])
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
 
@@ -195,7 +205,7 @@ def test_make_lead_agent_filters_tools_from_available_skills(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["restricted", "legacy"]))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [_make_skill("restricted", ["read_file"]), _make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [_make_skill("restricted", ["read_file"]), _make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
 
     mock_app_config = MagicMock()
@@ -218,7 +228,7 @@ def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=None))
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config: [_make_skill("legacy", None)])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
 
     mock_app_config = MagicMock()
@@ -251,6 +261,7 @@ def test_make_lead_agent_enforces_allowed_tools_when_skill_cache_is_cold(monkeyp
     with prompt_module._enabled_skills_lock:
         prompt_module._enabled_skills_cache = None
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None, **kwargs: mock_storage)
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None, **kwargs: mock_storage)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
@@ -279,6 +290,7 @@ def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
         raise RuntimeError("skill storage unavailable")
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", fail_storage)
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", fail_storage)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
     with pytest.raises(RuntimeError, match="skill storage unavailable"):

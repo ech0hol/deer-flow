@@ -80,10 +80,15 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         if (open) {
           open.messages.push(message);
         } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          // Orphaned tool message (e.g. skill_manage result arriving
+          // without a preceding AI processing group). Create a standalone
+          // processing group so it is still displayed rather than silently
+          // dropped.
+          groups.push({
+            id: message.id,
+            type: "assistant:processing",
+            messages: [message],
+          });
         }
       }
       continue;
