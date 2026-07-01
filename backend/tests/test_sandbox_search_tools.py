@@ -516,3 +516,23 @@ def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_pat
         assert str(user_abc_custom) not in result  # host paths must not leak
     finally:
         reset_current_user(token)
+
+
+def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    uploads = tmp_path / "uploads"
+    (uploads / "report.txt").write_text("ready\n", encoding="utf-8")
+    (uploads / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+    (uploads / ".upload-note.txt").write_text("intentional\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list uploads",
+        path="/mnt/user-data/uploads",
+    )
+
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert "/mnt/user-data/uploads/.upload-note.txt" in result
+    assert ".upload-active.part" not in result
