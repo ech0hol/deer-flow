@@ -7,7 +7,6 @@ import logging
 import mimetypes
 import re
 import time
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -72,8 +72,6 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
-INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
-INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
@@ -816,6 +814,7 @@ class ChannelManager:
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        inbound_dedupe_store: InboundDedupeStore | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -827,6 +826,9 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        # Inbound webhook dedupe store. Defaults to the in-process Memory store
+        # (pre-#4120 behavior). Multi-pod deployments inject a shared store.
+        self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
@@ -840,10 +842,6 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
-        # Insertion order == chronological (keys are never re-inserted), so an
-        # OrderedDict lets us evict expired/overflow entries from the front in
-        # O(k) instead of scanning all entries on every inbound message.
-        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -1134,7 +1132,7 @@ class ChannelManager:
             # answer. Provider adapters may emit ack side-effects (a "Working on
             # it…" reply, an "eyes" reaction) before publish_inbound, so those are
             # intentionally not deduped here.
-            if self._is_duplicate_inbound(msg):
+            if await self._is_duplicate_inbound(msg):
                 continue
             logger.info(
                 "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
@@ -1167,44 +1165,32 @@ class ChannelManager:
         if message_id is None:
             return None
 
-        # Fail closed: without a workspace/team/guild identifier we cannot tell two
-        # workspaces apart (e.g. Slack channel ids are not globally unique), so
-        # skip dedupe rather than risk collapsing distinct workspaces' messages.
+        # Without a workspace/team/guild identifier we cannot tell two workspaces
+        # apart (e.g. Slack channel ids are not globally unique), so we skip dedupe
+        # (return None -> proceed) rather than risk collapsing distinct workspaces'
+        # messages. This is intentionally fail-open: allowing a possible duplicate is
+        # safer than silently dropping a legitimate cross-workspace message.
         workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
         if not workspace_id:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
-    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+    async def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
         key = self._inbound_dedupe_key(msg)
         if key is None:
             return False
 
-        now = time.monotonic()
-        # Entries are in chronological insertion order, so expired ones cluster at
-        # the front: pop from the front until we hit a still-live entry.
-        while self._recent_inbound_events:
-            _, oldest_at = next(iter(self._recent_inbound_events.items()))
-            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
-                self._recent_inbound_events.popitem(last=False)
-            else:
-                break
-        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
-            self._recent_inbound_events.popitem(last=False)
-
-        if key in self._recent_inbound_events:
+        is_duplicate = await self._inbound_dedupe_store.try_record(key)
+        if is_duplicate:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-            return True
+        return is_duplicate
 
-        self._recent_inbound_events[key] = now
-        return False
-
-    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+    async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
         """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
@@ -1214,7 +1200,7 @@ class ChannelManager:
         """
         key = self._inbound_dedupe_key(msg)
         if key is not None:
-            self._recent_inbound_events.pop(key, None)
+            await self._inbound_dedupe_store.release(key)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1269,7 +1255,7 @@ class ChannelManager:
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
-            self._release_inbound_dedupe_key(msg)
+            await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------

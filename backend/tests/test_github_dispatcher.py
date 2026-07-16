@@ -1170,8 +1170,8 @@ async def test_dedupe_identity_distinguishes_same_agent_name_across_users(base_d
     from app.channels.store import ChannelStore
 
     manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
-    assert manager._is_duplicate_inbound(by_owner["alice"]) is False
-    assert manager._is_duplicate_inbound(by_owner["bob"]) is False
+    assert await manager._is_duplicate_inbound(by_owner["alice"]) is False
+    assert await manager._is_duplicate_inbound(by_owner["bob"]) is False
 
 
 @pytest.mark.asyncio
